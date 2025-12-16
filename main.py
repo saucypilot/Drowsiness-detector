@@ -41,7 +41,7 @@ def eye_aspect_ratio(pts):
     return 0.0 if h == 0 else (v1 + v2) / (2.0 * h)
 
 def lm_to_xy(lm, w, h):
-    return np.array([lm.x * w, lm.y * h], dtype=np.float32)
+    return np.array([lm.x * w, lm.y * h], dtype=np.float32) # normalized to pixel coords
 
 # MediaPipe FaceMesh landmark indices for eyes (good baseline for EAR)
 LEFT_EYE  = [33, 160, 158, 133, 153, 144]
@@ -78,9 +78,12 @@ left_eye_mask  = np.zeros((H, W), dtype=np.uint8)
 right_eye_mask = np.zeros((H, W), dtype=np.uint8)
 eyes_mask      = np.zeros((H, W), dtype=np.uint8)
 
-while True:
-    print("inside while loop")
+# Enable resizing of windows
+cv2.namedWindow("Drowsiness Detector", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Drowsiness Detector", 960, 540)
 
+
+while True:
     ret, frame = cap.read()
     if not ret or frame is None:
         print("Camera read failed")
@@ -159,7 +162,7 @@ while True:
         cv2.putText(frame, "No face detected", (30, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
 
-    cv2.imshow("Webcam", frame)
+    cv2.imshow("Drowsiness Detector", frame)
 
     key = cv2.waitKey(1) & 0xFF
     if key == 27:  # ESC
