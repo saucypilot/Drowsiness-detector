@@ -96,6 +96,7 @@ class DrowsinessDetectorApp:
         return cv2.flip(frame, 1)
 
     def _draw_overlays(self, frame: np.ndarray, result: DrowsinessResult) -> None:
+        # Eye landmarks
         if result.left_eye is not None:
             for pt in result.left_eye.astype(int):
                 cv2.circle(frame, tuple(pt), 2, (0, 255, 0), -1)
@@ -103,18 +104,7 @@ class DrowsinessDetectorApp:
             for pt in result.right_eye.astype(int):
                 cv2.circle(frame, tuple(pt), 2, (0, 255, 0), -1)
 
-        if result.is_drowsy:
-            cv2.putText(
-                frame,
-                "DROWSINESS ALERT!",
-                (30, 80),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 0, 255),
-                3,
-            )
-            self.alarm.trigger()
-
+        # EAR overlays
         if result.ear is not None:
             cv2.putText(
                 frame,
@@ -144,3 +134,41 @@ class DrowsinessDetectorApp:
                 (0, 255, 255),
                 2,
             )
+
+        # Head pose overlays (pitch/yaw/roll)
+        if result.pitch_deg is not None and result.yaw_deg is not None and result.roll_deg is not None:
+            cv2.putText(
+                frame,
+                f"Pitch: {result.pitch_deg:+.1f}  Yaw: {result.yaw_deg:+.1f}  Roll: {result.roll_deg:+.1f}",
+                (30, 160),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+
+        # Nodding detection alert
+        if result.nod_detected:
+            cv2.putText(
+                frame,
+                "NOD DETECTED!",
+                (30, 200),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 0, 255),
+                3,
+            )
+            self.alarm.trigger()
+
+        # Drowsiness alert (EAR-based)
+        if result.is_drowsy:
+            cv2.putText(
+                frame,
+                "DROWSINESS ALERT!",
+                (30, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 0, 255),
+                3,
+            )
+            self.alarm.trigger()
