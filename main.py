@@ -1,14 +1,65 @@
 import cv2
 import numpy as np
 import time
+import threading
 
 import mediapipe as mp
 
-# text-to-speech alert
-USE_TTS = True
-if USE_TTS:
-    import pyttsx3
-    engine = pyttsx3.init()
+# Alarm sound when drowsy.
+USE_ALARM = True
+
+# Cooldown between alarm triggers (seconds)
+ALARM_COOLDOWN = 2.0
+
+# Alarm mode:
+#   - "wav": plays a .wav file asynchronously (Windows only via winsound)
+#   - "beep": uses a short beep pattern (best "no extra files" option)
+ALARM_MODE = "beep"
+ALARM_WAV_PATH = "alarm.wav"  # used only if ALARM_MODE == "wav"
+
+# Beep pattern (frequency Hz, duration ms) used when ALARM_MODE == "beep"
+BEEP_PATTERN = [(1200, 200), (900, 200), (1200, 200), (900, 400)]
+
+# Windows sound backend
+try:
+    import winsound  # Windows only
+except Exception:
+    winsound = None
+
+_alarm_lock = threading.Lock()
+_alarm_playing = False
+
+def _play_alarm_blocking():
+    """Runs in a background thread so the camera loop doesn't freeze."""
+    global _alarm_playing
+    try:
+        if ALARM_MODE == "wav" and winsound:
+            # Asynchronous play; we still hold a short window as "playing"
+            winsound.PlaySound(ALARM_WAV_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            time.sleep(1.2)
+        elif winsound:
+            for freq, dur in BEEP_PATTERN:
+                winsound.Beep(int(freq), int(dur))  # blocks, hence the thread
+        else:
+            # Cross-platform fallback: terminal bell (may be muted depending on OS/settings)
+            for _ in range(3):
+                print("\a", end="", flush=True)
+                time.sleep(0.25)
+    finally:
+        with _alarm_lock:
+            _alarm_playing = False
+
+def trigger_alarm():
+    """Start alarm if not already playing."""
+    global _alarm_playing
+    if not USE_ALARM:
+        return
+    with _alarm_lock:
+        if _alarm_playing:
+            return
+        _alarm_playing = True
+    t = threading.Thread(target=_play_alarm_blocking, daemon=True)
+    t.start()
 
 print("all good")
 
@@ -41,7 +92,7 @@ def eye_aspect_ratio(pts):
     return 0.0 if h == 0 else (v1 + v2) / (2.0 * h)
 
 def lm_to_xy(lm, w, h):
-    return np.array([lm.x * w, lm.y * h], dtype=np.float32) # normalized to pixel coords
+    return np.array([lm.x * w, lm.y * h], dtype=np.float32)  # normalized to pixel coords
 
 # MediaPipe FaceMesh landmark indices for eyes (good baseline for EAR)
 LEFT_EYE  = [33, 160, 158, 133, 153, 144]
@@ -50,13 +101,11 @@ RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 # Drowsiness logic
 EAR_THRESHOLD = 0.22     # tune 0.18 - 0.25 depending on your face/camera
 CONSEC_FRAMES = 20       # how many consecutive frames EAR must be low
-ALARM_COOLDOWN = 2.0     # seconds between voice alerts
 
 closed_frames = 0
 last_alarm_time = 0.0
 
-# Camera parameters + preallocated eye masks 
-# Grab one frame to lock in dimensions (faster than reallocating every frame)
+# Camera parameters + preallocated eye masks
 ret0, frame0 = cap.read()
 if not ret0 or frame0 is None:
     print("Camera read failed on startup")
@@ -65,7 +114,6 @@ if not ret0 or frame0 is None:
 frame0 = cv2.flip(frame0, 1)
 H, W = frame0.shape[:2]
 
-# Store camera parameters (some webcams return 0 for these; we fall back to frame size)
 camera_params = {
     "width":  int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or W,
     "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or H,
@@ -73,15 +121,12 @@ camera_params = {
 }
 print("Camera params:", camera_params)
 
-# Pre-allocate single-channel masks; reuse by clearing each frame
 left_eye_mask  = np.zeros((H, W), dtype=np.uint8)
 right_eye_mask = np.zeros((H, W), dtype=np.uint8)
 eyes_mask      = np.zeros((H, W), dtype=np.uint8)
 
-# Enable resizing of windows
 cv2.namedWindow("Drowsiness Detector", cv2.WINDOW_NORMAL)
 cv2.resizeWindow("Drowsiness Detector", 960, 540)
-
 
 while True:
     ret, frame = cap.read()
@@ -92,19 +137,16 @@ while True:
     frame = cv2.flip(frame, 1)
     h, w = frame.shape[:2]
 
-    # If resolution changes mid-run, reallocate masks once
     if (h, w) != (H, W):
         H, W = h, w
         left_eye_mask  = np.zeros((H, W), dtype=np.uint8)
         right_eye_mask = np.zeros((H, W), dtype=np.uint8)
         eyes_mask      = np.zeros((H, W), dtype=np.uint8)
 
-    # Clear masks (reuse allocated arrays)
     left_eye_mask.fill(0)
     right_eye_mask.fill(0)
     eyes_mask.fill(0)
 
-    # MediaPipe expects RGB (NOT grayscale)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(rgb)
 
@@ -118,17 +160,12 @@ while True:
 
         ear = (eye_aspect_ratio(left_pts) + eye_aspect_ratio(right_pts)) / 2.0
 
-        # Allocate (fill) left/right eye masks as convex polygons
         lp = left_pts.astype(np.int32)
         rp = right_pts.astype(np.int32)
         cv2.fillConvexPoly(left_eye_mask, lp, 255)
         cv2.fillConvexPoly(right_eye_mask, rp, 255)
         cv2.bitwise_or(left_eye_mask, right_eye_mask, eyes_mask)
-        
-        # Example: eye-only ROIs (everything else black)
-        left_eye_roi  = cv2.bitwise_and(frame, frame, mask=left_eye_mask)
-        right_eye_roi = cv2.bitwise_and(frame, frame, mask=right_eye_mask)
-        
+
         # Draw eye points
         for p in left_pts.astype(int):
             cv2.circle(frame, tuple(p), 2, (0, 255, 0), -1)
@@ -147,10 +184,9 @@ while True:
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
 
             now = time.time()
-            if USE_TTS and (now - last_alarm_time) > ALARM_COOLDOWN:
+            if (now - last_alarm_time) > ALARM_COOLDOWN:
                 last_alarm_time = now
-                engine.say("Wake up")
-                engine.runAndWait()
+                trigger_alarm()
 
     # HUD text
     if ear is not None:
