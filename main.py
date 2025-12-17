@@ -1,113 +1,112 @@
 import cv2
 import numpy as np
 import time
-import threading
-import sys
 import os
-import shutil
+import sys
+import threading
 import subprocess
 
 import mediapipe as mp
 
-# Plays an alarm when drowsy (cross-platform).
-USE_ALARM = True
+WINDOW_NAME = "Drowsiness Detector"
 
-# Cooldown between alarm triggers (seconds)
-ALARM_COOLDOWN = 2.0
+def _window_is_open(name: str) -> bool:
+    """Return True if an OpenCV HighGUI window exists and is visible."""
+    try:
+        prop = cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE)
+        return prop >= 1
+    except cv2.error:
+        return False
 
-# Alarm mode:
-#   - "wav": plays a .wav file (Windows/macOS/Linux via available system players)
-#   - "beep": beep pattern (Windows) or terminal bell fallback (macOS/Linux)
-ALARM_MODE = "beep"
-ALARM_WAV_PATH = "alarm.wav"  # used only if ALARM_MODE == "wav"
 
-# Beep pattern (frequency Hz, duration ms) used on Windows when ALARM_MODE == "beep"
-BEEP_PATTERN = [(1200, 200), (900, 200), (1200, 200), (900, 400)]
-
-# Windows sound backend (only exists on Windows)
-try:
-    import winsound  # type: ignore
-except Exception:
-    winsound = None
+# ----------------------------
+# Alarm (cross-platform, non-blocking)
+# ----------------------------
+ALARM_MODE = "beep"   # "beep" or "wav"
+ALARM_WAV_PATH = "alarm.wav"  # only used if ALARM_MODE == "wav"
+ALARM_COOLDOWN = 2.0  # seconds between alarm triggers
 
 _alarm_lock = threading.Lock()
 _alarm_playing = False
 
-def _which(cmd: str):
-    return shutil.which(cmd)
-
-def _play_wav_with_system_player(path: str) -> bool:
-    """Try to play a wav file using native/system tools. Returns True if we tried."""
-    if not os.path.exists(path):
+def _try_run(cmd: list[str]) -> bool:
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
         return False
 
-    plat = sys.platform
+def _play_alarm_wav():
+    # WAV playback via native tools
+    if sys.platform.startswith("win"):
+        try:
+            import winsound
+            winsound.PlaySound(ALARM_WAV_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            return
+        except Exception:
+            pass
 
-    # Windows: winsound is the simplest (no external deps)
-    if plat.startswith("win") and winsound:
-        # Async, but we still sleep a bit so we don't immediately re-trigger
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        time.sleep(1.2)
-        return True
+    if sys.platform == "darwin":
+        # macOS: afplay
+        if _try_run(["afplay", ALARM_WAV_PATH]):
+            return
 
-    # macOS: afplay is built-in
-    if plat == "darwin" and _which("afplay"):
-        subprocess.run(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
+    # Linux / other: paplay -> aplay -> ffplay
+    if _try_run(["paplay", ALARM_WAV_PATH]): return
+    if _try_run(["aplay", ALARM_WAV_PATH]): return
+    _try_run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", ALARM_WAV_PATH])
 
-    # Linux: try common audio players (prefer paplay if available)
-    if plat.startswith("linux"):
-        for player in ("paplay", "aplay", "ffplay"):
-            if _which(player):
-                if player == "ffplay":
-                    subprocess.run([player, "-nodisp", "-autoexit", "-loglevel", "quiet", path],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                else:
-                    subprocess.run([player, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return True
+def _play_alarm_beep():
+    if sys.platform.startswith("win"):
+        try:
+            import winsound
+            # A punchy beep pattern
+            for _ in range(3):
+                winsound.Beep(1200, 200)
+                time.sleep(0.05)
+                winsound.Beep(900, 200)
+                time.sleep(0.05)
+            return
+        except Exception:
+            pass
 
-    return False
+    # Fallback: terminal bell
+    for _ in range(6):
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+        time.sleep(0.12)
 
-def _terminal_bell(times: int = 3, gap: float = 0.25):
-    # Works on most terminals, but can be muted by OS/terminal settings.
-    for _ in range(times):
-        print("\a", end="", flush=True)
-        time.sleep(gap)
-
-def _play_alarm_blocking():
-    """Runs in a background thread so the camera loop doesn't freeze."""
+def trigger_alarm_nonblocking():
     global _alarm_playing
-    try:
-        if ALARM_MODE == "wav":
-            # Try a real wav alarm first; if not possible, fall back to beeps/bell.
-            if _play_wav_with_system_player(ALARM_WAV_PATH):
-                return
-
-        # Beep mode (or wav fallback)
-        if sys.platform.startswith("win") and winsound:
-            for freq, dur in BEEP_PATTERN:
-                winsound.Beep(int(freq), int(dur))  # blocks, hence the thread
-        else:
-            _terminal_bell(times=5, gap=0.18)
-
-    finally:
-        with _alarm_lock:
-            _alarm_playing = False
-
-def trigger_alarm():
-    """Start alarm if not already playing."""
-    global _alarm_playing
-    if not USE_ALARM:
-        return
     with _alarm_lock:
         if _alarm_playing:
             return
         _alarm_playing = True
-    threading.Thread(target=_play_alarm_blocking, daemon=True).start()
 
+    def _runner():
+        global _alarm_playing
+        try:
+            if ALARM_MODE == "wav":
+                if os.path.exists(ALARM_WAV_PATH):
+                    _play_alarm_wav()
+                else:
+                    # No wav found -> beep fallback
+                    _play_alarm_beep()
+            else:
+                _play_alarm_beep()
+        finally:
+            # Let it be triggerable again shortly after
+            time.sleep(0.3)
+            with _alarm_lock:
+                _alarm_playing = False
+
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+print("all good")
 
 # Use 0 for default webcam.
-# On Windows, CAP_DSHOW often behaves better; on macOS/Linux it can break, so we avoid it.
+# CAP_DSHOW is Windows-only; don’t force it on other OS.
 if sys.platform.startswith("win"):
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 else:
@@ -116,6 +115,7 @@ else:
 if not cap.isOpened():
     print("Cannot open camera")
     raise SystemExit
+
 
 # MediaPipe FaceMesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -140,20 +140,20 @@ def eye_aspect_ratio(pts):
     return 0.0 if h == 0 else (v1 + v2) / (2.0 * h)
 
 def lm_to_xy(lm, w, h):
-    return np.array([lm.x * w, lm.y * h], dtype=np.float32)  # normalized to pixel coords
+    return np.array([lm.x * w, lm.y * h], dtype=np.float32)
 
-# MediaPipe FaceMesh landmark indices for eyes (good baseline for EAR)
+# MediaPipe FaceMesh landmark indices for eyes
 LEFT_EYE  = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
 # Drowsiness logic
-EAR_THRESHOLD = 0.22     # tune 0.18 - 0.25 depending on your face/camera
-CONSEC_FRAMES = 20       # how many consecutive frames EAR must be low
+EAR_THRESHOLD = 0.22
+CONSEC_FRAMES = 20
 
 closed_frames = 0
 last_alarm_time = 0.0
 
-# Camera parameters + preallocated eye masks
+# Grab one frame to lock in dimensions
 ret0, frame0 = cap.read()
 if not ret0 or frame0 is None:
     print("Camera read failed on startup")
@@ -173,10 +173,14 @@ left_eye_mask  = np.zeros((H, W), dtype=np.uint8)
 right_eye_mask = np.zeros((H, W), dtype=np.uint8)
 eyes_mask      = np.zeros((H, W), dtype=np.uint8)
 
-cv2.namedWindow("Drowsiness Detector", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Drowsiness Detector", 960, 540)
+# Enable resizing of windows
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(WINDOW_NAME, 960, 540)
 
 while True:
+    if not _window_is_open(WINDOW_NAME):
+        break
+
     ret, frame = cap.read()
     if not ret or frame is None:
         print("Camera read failed")
@@ -202,7 +206,6 @@ while True:
 
     if results.multi_face_landmarks:
         lms = results.multi_face_landmarks[0].landmark
-
         left_pts  = np.array([lm_to_xy(lms[i], w, h) for i in LEFT_EYE])
         right_pts = np.array([lm_to_xy(lms[i], w, h) for i in RIGHT_EYE])
 
@@ -214,19 +217,16 @@ while True:
         cv2.fillConvexPoly(right_eye_mask, rp, 255)
         cv2.bitwise_or(left_eye_mask, right_eye_mask, eyes_mask)
 
-        # Draw eye points
         for p in left_pts.astype(int):
             cv2.circle(frame, tuple(p), 2, (0, 255, 0), -1)
         for p in right_pts.astype(int):
             cv2.circle(frame, tuple(p), 2, (0, 255, 0), -1)
 
-        # Drowsiness counter
         if ear < EAR_THRESHOLD:
             closed_frames += 1
         else:
             closed_frames = 0
 
-        # Trigger alert
         if closed_frames >= CONSEC_FRAMES:
             cv2.putText(frame, "DROWSINESS ALERT!", (30, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
@@ -234,9 +234,8 @@ while True:
             now = time.time()
             if (now - last_alarm_time) > ALARM_COOLDOWN:
                 last_alarm_time = now
-                trigger_alarm()
+                trigger_alarm_nonblocking()
 
-    # HUD text
     if ear is not None:
         cv2.putText(frame, f"EAR: {ear:.3f}", (30, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
@@ -246,10 +245,12 @@ while True:
         cv2.putText(frame, "No face detected", (30, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
 
-    cv2.imshow("Drowsiness Detector", frame)
+    cv2.imshow(WINDOW_NAME, frame)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == 27:  # ESC
+    if not _window_is_open(WINDOW_NAME):
+        break
+    if key == 27:
         break
 
 cap.release()
