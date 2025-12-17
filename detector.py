@@ -5,6 +5,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+from head_pose import HeadPoseEstimator, HeadPoseAngles
+
 
 @dataclass
 class DrowsinessResult:
@@ -13,6 +15,10 @@ class DrowsinessResult:
     is_drowsy: bool
     left_eye: Optional[np.ndarray]
     right_eye: Optional[np.ndarray]
+    pitch_deg: Optional[float]
+    yaw_deg: Optional[float]
+    roll_deg: Optional[float]
+    nod_detected: bool
 
 
 class DrowsinessDetector:
@@ -29,6 +35,7 @@ class DrowsinessDetector:
         self.ear_threshold = ear_threshold
         self.consec_frames = consec_frames
         self.closed_frames = 0
+
         self._face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
@@ -36,6 +43,8 @@ class DrowsinessDetector:
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
+
+        self._head_pose = HeadPoseEstimator()
 
     def process(self, frame: np.ndarray) -> DrowsinessResult:
         h, w = frame.shape[:2]
@@ -46,8 +55,12 @@ class DrowsinessDetector:
         left_pts = None
         right_pts = None
 
+        pitch = yaw = roll = None
+        nod_detected = False
+
         if results.multi_face_landmarks:
             lms = results.multi_face_landmarks[0].landmark
+
             left_pts = np.array([self._lm_to_xy(lms[i], w, h) for i in self.LEFT_EYE], dtype=np.float32)
             right_pts = np.array([self._lm_to_xy(lms[i], w, h) for i in self.RIGHT_EYE], dtype=np.float32)
 
@@ -58,9 +71,26 @@ class DrowsinessDetector:
             else:
                 self.closed_frames = 0
 
+            angles, nod_detected = self._head_pose.estimate_from_landmarks(lms, w, h)
+            pitch, yaw, roll = angles.pitch_deg, angles.yaw_deg, angles.roll_deg
+        else:
+            # If no face, reset closed frames (optional; keep your existing behavior if you prefer)
+            # self.closed_frames = 0
+            pass
+
         is_drowsy = self.closed_frames >= self.consec_frames
-        return DrowsinessResult(ear=ear, closed_frames=self.closed_frames, is_drowsy=is_drowsy,
-                                left_eye=left_pts, right_eye=right_pts)
+
+        return DrowsinessResult(
+            ear=ear,
+            closed_frames=self.closed_frames,
+            is_drowsy=is_drowsy,
+            left_eye=left_pts,
+            right_eye=right_pts,
+            pitch_deg=pitch,
+            yaw_deg=yaw,
+            roll_deg=roll,
+            nod_detected=nod_detected,
+        )
 
     def close(self) -> None:
         self._face_mesh.close()
