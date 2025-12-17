@@ -2,49 +2,94 @@ import cv2
 import numpy as np
 import time
 import threading
+import sys
+import os
+import shutil
+import subprocess
 
 import mediapipe as mp
 
-# Alarm sound when drowsy.
+# Plays an alarm when drowsy (cross-platform).
 USE_ALARM = True
 
 # Cooldown between alarm triggers (seconds)
 ALARM_COOLDOWN = 2.0
 
 # Alarm mode:
-#   - "wav": plays a .wav file asynchronously (Windows only via winsound)
-#   - "beep": uses a short beep pattern (best "no extra files" option)
+#   - "wav": plays a .wav file (Windows/macOS/Linux via available system players)
+#   - "beep": beep pattern (Windows) or terminal bell fallback (macOS/Linux)
 ALARM_MODE = "beep"
 ALARM_WAV_PATH = "alarm.wav"  # used only if ALARM_MODE == "wav"
 
-# Beep pattern (frequency Hz, duration ms) used when ALARM_MODE == "beep"
+# Beep pattern (frequency Hz, duration ms) used on Windows when ALARM_MODE == "beep"
 BEEP_PATTERN = [(1200, 200), (900, 200), (1200, 200), (900, 400)]
 
-# Windows sound backend
+# Windows sound backend (only exists on Windows)
 try:
-    import winsound  # Windows only
+    import winsound  # type: ignore
 except Exception:
     winsound = None
 
 _alarm_lock = threading.Lock()
 _alarm_playing = False
 
+def _which(cmd: str):
+    return shutil.which(cmd)
+
+def _play_wav_with_system_player(path: str) -> bool:
+    """Try to play a wav file using native/system tools. Returns True if we tried."""
+    if not os.path.exists(path):
+        return False
+
+    plat = sys.platform
+
+    # Windows: winsound is the simplest (no external deps)
+    if plat.startswith("win") and winsound:
+        # Async, but we still sleep a bit so we don't immediately re-trigger
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        time.sleep(1.2)
+        return True
+
+    # macOS: afplay is built-in
+    if plat == "darwin" and _which("afplay"):
+        subprocess.run(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+
+    # Linux: try common audio players (prefer paplay if available)
+    if plat.startswith("linux"):
+        for player in ("paplay", "aplay", "ffplay"):
+            if _which(player):
+                if player == "ffplay":
+                    subprocess.run([player, "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.run([player, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+
+    return False
+
+def _terminal_bell(times: int = 3, gap: float = 0.25):
+    # Works on most terminals, but can be muted by OS/terminal settings.
+    for _ in range(times):
+        print("\a", end="", flush=True)
+        time.sleep(gap)
+
 def _play_alarm_blocking():
     """Runs in a background thread so the camera loop doesn't freeze."""
     global _alarm_playing
     try:
-        if ALARM_MODE == "wav" and winsound:
-            # Asynchronous play; we still hold a short window as "playing"
-            winsound.PlaySound(ALARM_WAV_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            time.sleep(1.2)
-        elif winsound:
+        if ALARM_MODE == "wav":
+            # Try a real wav alarm first; if not possible, fall back to beeps/bell.
+            if _play_wav_with_system_player(ALARM_WAV_PATH):
+                return
+
+        # Beep mode (or wav fallback)
+        if sys.platform.startswith("win") and winsound:
             for freq, dur in BEEP_PATTERN:
                 winsound.Beep(int(freq), int(dur))  # blocks, hence the thread
         else:
-            # Cross-platform fallback: terminal bell (may be muted depending on OS/settings)
-            for _ in range(3):
-                print("\a", end="", flush=True)
-                time.sleep(0.25)
+            _terminal_bell(times=5, gap=0.18)
+
     finally:
         with _alarm_lock:
             _alarm_playing = False
@@ -58,13 +103,16 @@ def trigger_alarm():
         if _alarm_playing:
             return
         _alarm_playing = True
-    t = threading.Thread(target=_play_alarm_blocking, daemon=True)
-    t.start()
+    threading.Thread(target=_play_alarm_blocking, daemon=True).start()
 
-print("all good")
 
-# Use 0 for default webcam. On Windows, CAP_DSHOW often behaves better.
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+# Use 0 for default webcam.
+# On Windows, CAP_DSHOW often behaves better; on macOS/Linux it can break, so we avoid it.
+if sys.platform.startswith("win"):
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+else:
+    cap = cv2.VideoCapture(0)
+
 if not cap.isOpened():
     print("Cannot open camera")
     raise SystemExit
