@@ -11,7 +11,7 @@ At a high level, the script:
 * Detects a face using **MediaPipe FaceMesh**
 * Extracts eye landmarks
 * Computes **Eye Aspect Ratio (EAR)** every frame
-* If EAR stays below a threshold for *N consecutive frames*:
+* If EAR stays below a threshold for 1.5 continuous seconds:
 
   * Displays a **DROWSINESS ALERT**
   * Optionally speaks “Wake up” using text-to-speech
@@ -93,26 +93,41 @@ python main.py
 
 ## Configuration (Important)
 
-These constants control behavior:
+The app now calibrates EAR automatically for each person during startup. Look
+normally at the camera for five seconds while the progress bar fills. The
+median observed EAR becomes the baseline, and the personal threshold is 75%
+of that baseline:
 
 ```python
-EAR_THRESHOLD = 0.22
-CONSEC_FRAMES = 20
+baseline_ear = median(calibration_samples)
+ear_threshold = baseline_ear * 0.75
+```
+
+The relevant defaults are:
+
+```python
+CALIBRATION_SECONDS = 5.0
+THRESHOLD_RATIO = 0.75
+DROWSY_DURATION_SECONDS = 1.5
 ALARM_COOLDOWN = 2.0
 USE_TTS = True
 ```
 
 ### What they mean
 
-* **EAR_THRESHOLD**
+* **CALIBRATION_SECONDS**
 
+  * How long to observe normal, open eyes at startup
+
+* **THRESHOLD_RATIO**
+
+  * Personal threshold as a fraction of the median baseline EAR
   * Lower = stricter eye closure detection
-  * Typical range: `0.20 – 0.25`
 
-* **CONSEC_FRAMES**
+* **DROWSY_DURATION_SECONDS**
 
-  * Number of frames eyes must stay closed
-  * At ~30 FPS, 20 frames ≈ 0.66 seconds
+  * Elapsed time the eyes must remain closed before an alert
+  * Uses a monotonic clock, so behavior is independent of camera FPS
 
 * **ALARM_COOLDOWN**
 
@@ -122,7 +137,9 @@ USE_TTS = True
 
   * Toggle voice alerts on/off
 
-If you wear glasses or have a narrow eye shape, you *will* need to tune `EAR_THRESHOLD`.
+Glasses, camera position, distance, and natural eye shape are accounted for by
+the per-session calibration. An explicit `ear_threshold` can still be passed to
+`DrowsinessDetectorApp` to bypass calibration when needed.
 
 ---
 
@@ -146,9 +163,12 @@ Distances between eyelid landmarks are computed using Euclidean distance.
 
 ### Drowsiness Logic
 
-* EAR below threshold → increment counter
-* EAR above threshold → reset counter
-* Counter exceeds limit → alert
+* Collect five seconds of normal open-eye EAR samples at startup
+* Use the median sample as the baseline
+* Set the personal threshold to `baseline × 0.75`
+* EAR below threshold → start or continue the closure timer
+* EAR above threshold, or face lost → reset the timer
+* Continuous closure reaches 1.5 seconds → alert
 
 This prevents false positives from blinking.
 
