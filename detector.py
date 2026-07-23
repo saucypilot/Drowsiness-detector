@@ -243,7 +243,7 @@ class DrowsinessDetector:
 
     def _prune_history(self, now: float) -> None:
         cutoff = now - self.risk_window_s
-        while self._eye_segments and self._eye_segments[0][0] < cutoff:
+        while self._eye_segments and self._eye_segments[0][0] <= cutoff:
             self._eye_segments.popleft()
         while self._blink_events and self._blink_events[0][0] < cutoff:
             self._blink_events.popleft()
@@ -256,8 +256,15 @@ class DrowsinessDetector:
     ) -> Tuple[float, str, float, float, float, int]:
         self._prune_history(now)
 
-        observed_s = sum(segment[2] for segment in self._eye_segments)
-        closed_s = sum(segment[2] for segment in self._eye_segments if segment[1])
+        cutoff = now - self.risk_window_s
+        observed_s = 0.0
+        closed_s = 0.0
+        for segment_end, eyes_closed, duration_s in self._eye_segments:
+            segment_start = segment_end - duration_s
+            overlap_s = max(0.0, segment_end - max(segment_start, cutoff))
+            observed_s += overlap_s
+            if eyes_closed:
+                closed_s += overlap_s
         perclos_percent = 0.0 if observed_s == 0 else (closed_s / observed_s) * 100.0
 
         minutes = max(observed_s / 60.0, 1.0 / 60.0)
