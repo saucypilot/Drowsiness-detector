@@ -1,32 +1,46 @@
-# Webcam Drowsiness Detection (Eye Aspect Ratio + MediaPipe)
+# Webcam Drowsiness Detection (EAR + MediaPipe)
 
-This project is a **real-time drowsiness detection system** using your webcam. It tracks facial landmarks, measures how open your eyes are using **Eye Aspect Ratio (EAR)**, and triggers a visual (and optional voice) alert if your eyes remain closed for too long.
+This project is a real-time drowsiness detection system using your webcam. It
+tracks facial landmarks, measures eye openness with Eye Aspect Ratio (EAR),
+estimates head nodding, and combines those signals into a single drowsiness risk
+score.
+
 ---
 
 ## What This Program Does
 
-At a high level, the script:
+At a high level, the app:
 
 * Captures live video from your webcam
-* Detects a face using **MediaPipe FaceMesh**
+* Detects one face using MediaPipe
 * Extracts eye landmarks
-* Computes **Eye Aspect Ratio (EAR)** every frame
-* If EAR stays below a threshold for 1.5 continuous seconds:
+* Computes Eye Aspect Ratio (EAR) every frame
+* Calibrates a personal open-eye baseline at startup
+* Tracks eye closure duration, blink behavior, PERCLOS, and head nods
+* Combines those signals into a 0-100 drowsiness risk score
+* Triggers the alarm when the score reaches the drowsy range
 
-  * Displays a **DROWSINESS ALERT**
-  * Optionally speaks “Wake up” using text-to-speech
+The driver-state panel shows:
 
-Think of it like a guard watching a door:
+```text
+DRIVER STATE
 
-* Door open → you’re awake
-* Door briefly closes → blink (ignored)
-* Door stays shut → alarm
+Drowsiness Risk: 72%
+[risk bar]
+
+Eyes:    Frequent closure
+PERCLOS: 31%
+Head:    2 nods detected
+Blink:   18/min
+
+STATUS: DROWSY
+```
 
 ---
 
-## Why EAR Works (Conceptual Explanation)
+## Why EAR Works
 
-EAR measures the **ratio of eye height to eye width**.
+EAR measures the ratio of eye height to eye width.
 
 When your eyes are open:
 
@@ -38,25 +52,28 @@ When your eyes close:
 * Vertical distance collapses
 * EAR drops sharply
 
-The math is simple but effective:
+The formula:
 
-```
+```text
 EAR = (vertical_1 + vertical_2) / (2 * horizontal)
 ```
 
-This stays surprisingly stable across different people and lighting conditions.
+EAR is useful, but it is not enough by itself. Different people, glasses,
+camera position, and camera distance can shift the absolute value. This app
+therefore calibrates EAR per session and uses EAR as one input into a combined
+risk score.
 
 ---
 
 ## Technologies Used
 
-* **Python 3**
-* **OpenCV (cv2)** – webcam capture + drawing
-* **MediaPipe FaceMesh** – 468 facial landmarks
-* **NumPy** – vector math
-* **pyttsx3 (optional)** – offline text-to-speech
+* Python 3
+* OpenCV - webcam capture and drawing
+* MediaPipe - facial landmarks
+* NumPy - vector math
+* pyttsx3 or system beep support for optional alarms
 
-No cloud models. No internet required.
+No cloud model is used while the app runs.
 
 ---
 
@@ -75,7 +92,7 @@ cd drowsiness-detection
 pip install opencv-python mediapipe numpy pyttsx3
 ```
 
-> If you don’t want voice alerts, you can skip `pyttsx3`.
+If you do not want voice alerts, you can skip `pyttsx3`.
 
 ---
 
@@ -85,18 +102,20 @@ pip install opencv-python mediapipe numpy pyttsx3
 python main.py
 ```
 
-* Press **ESC** to exit.
-* Make sure your face is visible and well-lit.
+* Press ESC to exit.
+* Make sure your face is visible and well lit.
 * Webcam index defaults to `0`.
+
+On startup, the app calibrates for five seconds. Look normally at the camera
+with your eyes open until the progress bar completes.
 
 ---
 
-## Configuration (Important)
+## Configuration
 
-The app now calibrates EAR automatically for each person during startup. Look
-normally at the camera for five seconds while the progress bar fills. The
-median observed EAR becomes the baseline, and the personal threshold is 75%
-of that baseline:
+The app calibrates EAR automatically for each person during startup. The median
+observed EAR becomes the baseline, and the personal threshold is 75% of that
+baseline:
 
 ```python
 baseline_ear = median(calibration_samples)
@@ -109,84 +128,95 @@ The relevant defaults are:
 CALIBRATION_SECONDS = 5.0
 THRESHOLD_RATIO = 0.75
 DROWSY_DURATION_SECONDS = 1.5
+RISK_WINDOW_SECONDS = 60.0
+LONG_BLINK_MIN_SECONDS = 0.7
 ALARM_COOLDOWN = 2.0
 USE_TTS = True
 ```
 
-### What they mean
+What they mean:
 
-* **CALIBRATION_SECONDS**
-
-  * How long to observe normal, open eyes at startup
-
-* **THRESHOLD_RATIO**
-
-  * Personal threshold as a fraction of the median baseline EAR
-  * Lower = stricter eye closure detection
-
-* **DROWSY_DURATION_SECONDS**
-
-  * Elapsed time the eyes must remain closed before an alert
-  * Uses a monotonic clock, so behavior is independent of camera FPS
-
-* **ALARM_COOLDOWN**
-
-  * Minimum seconds between voice alerts
-
-* **USE_TTS**
-
-  * Toggle voice alerts on/off
+* `CALIBRATION_SECONDS`: how long to observe normal, open eyes at startup
+* `THRESHOLD_RATIO`: personal threshold as a fraction of median baseline EAR
+* `DROWSY_DURATION_SECONDS`: continuous eye closure duration that contributes full eye-closure risk
+* `RISK_WINDOW_SECONDS`: rolling window used for PERCLOS, blink rate, long blinks, and nod count
+* `LONG_BLINK_MIN_SECONDS`: minimum closure duration counted as a long blink
+* `ALARM_COOLDOWN`: minimum seconds between alarm sounds
 
 Glasses, camera position, distance, and natural eye shape are accounted for by
-the per-session calibration. An explicit `ear_threshold` can still be passed to
+per-session calibration. An explicit `ear_threshold` can still be passed to
 `DrowsinessDetectorApp` to bypass calibration when needed.
 
 ---
 
-## How the Code Is Structured
+## Drowsiness Logic
 
-### Webcam Initialization
+The detector now uses a combined drowsiness risk score instead of independent
+EAR and nod alarms.
 
-Uses OpenCV to capture live frames. The frame is mirrored so movement feels natural.
+Startup calibration:
 
-### Face Detection
-
-MediaPipe FaceMesh tracks facial landmarks in real time. Only one face is processed for performance and simplicity.
-
-### Eye Landmark Selection
-
-Each eye uses **6 specific landmarks** chosen for stable EAR computation.
-
-### EAR Calculation
-
-Distances between eyelid landmarks are computed using Euclidean distance.
-
-### Drowsiness Logic
-
-* Collect five seconds of normal open-eye EAR samples at startup
+* Collect five seconds of normal open-eye EAR samples
 * Use the median sample as the baseline
-* Set the personal threshold to `baseline × 0.75`
-* EAR below threshold → start or continue the closure timer
-* EAR above threshold, or face lost → reset the timer
-* Continuous closure reaches 1.5 seconds → alert
+* Set the personal threshold to `baseline * 0.75`
 
-This prevents false positives from blinking.
+Runtime tracking:
+
+* EAR below threshold starts or continues the eye-closure timer
+* EAR above threshold records a blink event and resets the closure timer
+* PERCLOS is computed from elapsed closed time in a rolling 60-second window
+* Long blinks are closures of at least 0.7 seconds
+* Nod events are counted in the same rolling window
+
+Risk score:
+
+```python
+risk_score = (
+    prolonged_eye_closure * 0.45
+    + frequent_long_blinks * 0.20
+    + nod_score * 0.20
+    + perclos_score * 0.15
+)
+```
+
+If continuous eye closure reaches `DROWSY_DURATION_SECONDS`, the score is
+floored into the drowsy band even if the rolling-window metrics are still
+warming up.
+
+Classification:
+
+* `0-30`: ALERT
+* `31-60`: FATIGUE WARNING
+* `61-80`: DROWSY
+* `81-100`: CRITICAL
+
+The alarm triggers from the combined score, not from separate EAR and nod
+checks.
+
+---
+
+## Code Structure
+
+* `main.py`: app entry point
+* `app.py`: webcam loop, calibration UI, driver-state overlay, alarm trigger
+* `detector.py`: MediaPipe landmarks, EAR, rolling risk state, risk scoring
+* `head_pose.py`: pitch/yaw/roll estimation and nod detection
+* `alarm.py`: asynchronous alarm playback with cooldown
 
 ---
 
 ## Performance Notes
 
-* Masks are pre-allocated to reduce memory churn
 * Frame resolution changes are handled dynamically
-* Real-time performance is typically 30–60 FPS on a normal laptop
-
-⚠️ Remove debug prints inside the loop if FPS drops — printing every frame will tank performance.
+* Risk metrics use elapsed time, so behavior is independent of camera FPS
+* Real-time performance is typically 30-60 FPS on a normal laptop
+* Printing every frame will reduce FPS noticeably
 
 ---
 
-## Limitations (Read This)
+## Limitations
 
-This is **not medical software**.
+This is not medical software.
 
 It can fail if:
 
@@ -196,7 +226,7 @@ It can fail if:
 * Face is partially occluded
 * Glasses cause glare
 
-It detects **eye closure**, not cognitive fatigue.
+It estimates drowsiness-related visual signals, not cognitive fatigue.
 
 ---
 
@@ -207,4 +237,3 @@ It detects **eye closure**, not cognitive fatigue.
 * Prototype for driver drowsiness systems
 * Computer vision learning project
 * MediaPipe / OpenCV practice
-

@@ -228,23 +228,95 @@ class DrowsinessDetectorApp:
             for pt in result.right_eye.astype(int):
                 cv2.circle(frame, tuple(pt), 2, (0, 255, 0), -1)
 
-        # EAR overlays
+        self._draw_driver_state_panel(frame, result)
+
+        if result.is_drowsy:
+            self.alarm.trigger()
+
+    def _draw_driver_state_panel(self, frame: np.ndarray, result: DrowsinessResult) -> None:
+        panel_x, panel_y = 24, 24
+        panel_w, panel_h = 390, 270
+        cv2.rectangle(
+            frame,
+            (panel_x, panel_y),
+            (panel_x + panel_w, panel_y + panel_h),
+            (20, 20, 20),
+            -1,
+        )
+        cv2.rectangle(
+            frame,
+            (panel_x, panel_y),
+            (panel_x + panel_w, panel_y + panel_h),
+            self._risk_color(result.risk_score),
+            2,
+        )
+
+        x = panel_x + 18
+        y = panel_y + 34
+        cv2.putText(
+            frame,
+            "DRIVER STATE",
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (255, 255, 255),
+            2,
+        )
+
+        y += 38
+        cv2.putText(
+            frame,
+            f"Drowsiness Risk: {result.risk_score:.0f}%",
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            (255, 255, 255),
+            2,
+        )
+
+        y += 16
+        bar_w, bar_h = 250, 16
+        cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (90, 90, 90), 1)
+        fill_w = int(bar_w * min(max(result.risk_score, 0.0), 100.0) / 100.0)
+        if fill_w > 2:
+            cv2.rectangle(
+                frame,
+                (x + 1, y + 1),
+                (x + fill_w - 1, y + bar_h - 1),
+                self._risk_color(result.risk_score),
+                -1,
+            )
+
+        y += 42
+        if result.ear is not None:
+            eye_line = f"Eyes:    {result.eye_status} ({result.closed_duration_s:.2f}s)"
+        else:
+            eye_line = "Eyes:    No face detected"
+        rows = [
+            eye_line,
+            f"PERCLOS:  {result.perclos_percent:.0f}%",
+            f"Head:     {result.recent_nods} nods detected",
+            f"Blink:    {result.blink_rate_per_min:.0f}/min",
+        ]
+        for row in rows:
+            cv2.putText(
+                frame,
+                row,
+                (x, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.58,
+                (235, 235, 235),
+                2,
+            )
+            y += 30
+
         if result.ear is not None:
             cv2.putText(
                 frame,
                 f"EAR: {result.ear:.3f}",
-                (30, 40),
+                (panel_x + panel_w + 24, 44),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (255, 255, 255),
-                2,
-            )
-            cv2.putText(
-                frame,
-                f"Eyes closed: {result.closed_duration_s:.2f}s",
-                (30, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
+                0.7,
                 (255, 255, 255),
                 2,
             )
@@ -252,57 +324,41 @@ class DrowsinessDetectorApp:
                 cv2.putText(
                     frame,
                     f"Personal threshold: {self.detector.ear_threshold:.3f}",
-                    (30, 155),
+                    (panel_x + panel_w + 24, 74),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.65,
                     (255, 255, 255),
                     2,
                 )
-        else:
-            cv2.putText(
-                frame,
-                "No face detected",
-                (30, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 255),
-                2,
-            )
 
-        # Head pose overlays (pitch/yaw/roll)
         if result.pitch_deg is not None and result.yaw_deg is not None and result.roll_deg is not None:
             cv2.putText(
                 frame,
                 f"Pitch: {result.pitch_deg:+.1f}  Yaw: {result.yaw_deg:+.1f}  Roll: {result.roll_deg:+.1f}",
-                (30, 190),
+                (panel_x + panel_w + 24, 104),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 (255, 255, 255),
                 2,
             )
 
-        # Nodding detection alert
-        if result.nod_detected:
-            cv2.putText(
-                frame,
-                "NOD DETECTED!",
-                (30, 230),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 0, 255),
-                3,
-            )
-            self.alarm.trigger()
+        y = panel_y + panel_h - 24
+        cv2.putText(
+            frame,
+            f"STATUS: {result.risk_level}",
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            self._risk_color(result.risk_score),
+            2,
+        )
 
-        # Drowsiness alert (EAR-based)
-        if result.is_drowsy:
-            cv2.putText(
-                frame,
-                "DROWSINESS ALERT!",
-                (30, 80),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 0, 255),
-                3,
-            )
-            self.alarm.trigger()
+    @staticmethod
+    def _risk_color(risk_score: float) -> Tuple[int, int, int]:
+        if risk_score <= 30.0:
+            return (0, 200, 0)
+        if risk_score <= 60.0:
+            return (0, 215, 255)
+        if risk_score <= 80.0:
+            return (0, 140, 255)
+        return (0, 0, 255)
